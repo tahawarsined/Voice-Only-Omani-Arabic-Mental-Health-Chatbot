@@ -1,0 +1,19 @@
+# Python virtual environments
+venv/
+
+# Byte-compiled / cache files
+__pycache__/
+*.py[cod]
+
+# Editor files
+.vscode/
+.idea/
+
+# Environment variables
+.env
+
+# pdf files
+*.pdf
+
+# text files
+*.txt
