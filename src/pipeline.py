@@ -1,17 +1,8 @@
-"""
-Orchestrates the end-to-end voice chatbot pipeline.
-
-This module integrates all the components (STT, NLP, Responder, TTS) into a
-single, asynchronous pipeline. It manages the conversation state, handles the
-flow of data from one stage to the next, and uses a ThreadPoolExecutor to run
-blocking I/O operations (like API calls) without freezing the UI.
-
-The main entry point is `process_audio_input`, which takes raw audio, processes it,
-and returns the synthesized audio response.
-"""
+# src/pipeline.py
 
 import asyncio
 import logging
+from logging.handlers import RotatingFileHandler
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Tuple
@@ -22,12 +13,28 @@ from src.constants import (
 )
 from src.nlp import analyze_text
 from src.responder import generate_response
-from src.stt import SpeechToText  # We will use a simplified STT for Gradio
 from src.tts import text_to_speech
+from src.stt_whisper import transcribe
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# ──────────────────────────────────────────────────────────────────────────────
+# BOOTSTRAP LOGGING ─ write DEBUG+ logs both to console and to a rolling file
+LOG_FORMAT = "%(asctime)s | %(name)s | %(levelname)s | %(message)s"
+logging.root.setLevel(logging.DEBUG)
 
-# Use a thread pool for concurrent execution of blocking tasks (LLM, TTS APIs)
+# Console handler (INFO+)
+ch = logging.StreamHandler()
+ch.setLevel(logging.INFO)
+ch.setFormatter(logging.Formatter(LOG_FORMAT))
+logging.root.addHandler(ch)
+
+# File handler (DEBUG+, 5 MB per file, keep last 3)
+fh = RotatingFileHandler("voicebot.log", maxBytes=5_000_000, backupCount=3, encoding="utf-8")
+fh.setLevel(logging.DEBUG)
+fh.setFormatter(logging.Formatter(LOG_FORMAT))
+logging.root.addHandler(fh)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Thread pool for blocking operations
 executor = ThreadPoolExecutor(max_workers=5)
 
 async def process_audio_input(
@@ -37,78 +44,79 @@ async def process_audio_input(
     """
     Processes a single turn of the conversation from audio input.
 
-    Args:
-        audio_filepath: The path to the temporary audio file from Gradio.
-        conversation_history: The history of the conversation so far.
-
     Returns:
-        A tuple containing:
-        - The generated response text.
-        - The synthesized audio response as bytes.
-        - The updated conversation history.
+        - response_text: Generated reply text.
+        - audio_response: Synthesized speech bytes.
+        - updated conversation_history.
     """
-    loop = asyncio.get_running_loop()
     start_time = time.time()
+    stt_time = None
 
     # 1. Speech-to-Text (STT)
-    # In a real-time streaming app, this would be more complex.
-    # For Gradio, we get a complete file, so we can use whisper directly.
     try:
-        import whisper
-        model = whisper.load_model("small")
-        transcription_result = await loop.run_in_executor(
-            executor, lambda: model.transcribe(audio_filepath, language="ar")
+        user_text = await asyncio.get_running_loop().run_in_executor(
+            executor, transcribe, audio_filepath, "ar"
         )
-        user_text = transcription_result["text"]
-        logging.info(f"STT Transcribed: {user_text}")
-    except Exception as e:
-        logging.error(f"STT failed: {e}")
+        logging.info(f"STT Transcribed: '{user_text}'")
+        stt_time = time.time()
+        logging.debug(f"→ STT duration: {(stt_time - start_time):.2f}s")
+    except Exception:
+        logging.exception("STT failed")
         user_text = ""
-
-    stt_time = time.time()
-    logging.info(f"STT finished in {stt_time - start_time:.2f}s")
-
-    if not user_text:
-        return "", b'', conversation_history
+        stt_time = time.time()
+        logging.debug(f"→ STT duration (failure path): {(stt_time - start_time):.2f}s")
+        # Bail out early on STT failure
+        return "", b"", conversation_history
 
     # 2. NLP Analysis (Intent & Sentiment)
+    nlp_time = time.time()
+    if stt_time is None:
+        logging.warning("stt_time was never set! Defaulting to start_time")
+        stt_time = start_time
     nlp_result = analyze_text(user_text)
     intent = nlp_result["intent"]
-    nlp_time = time.time()
-    logging.info(f"NLP finished in {nlp_time - stt_time:.2f}s. Intent: {intent}")
+    logging.info(f"NLP finished in {(nlp_time - stt_time):.2f}s. Intent: {intent}")
 
     # 3. Crisis Intervention Logic
-    # Check if the user is in a crisis state from a previous turn
-    in_crisis_protocol = conversation_history and conversation_history[-1].get("context") == "crisis"
+    in_crisis_protocol = (
+        conversation_history
+        and conversation_history[-1].get("context") == "crisis"
+    )
 
     if in_crisis_protocol:
-        # If user confirms safety, exit crisis mode. Otherwise, repeat message.
-        is_safe = any(word in user_text.lower() for word in CRISIS_SAFETY_CONFIRMATION_KEYWORDS)
+        is_safe = any(
+            word in user_text.lower()
+            for word in CRISIS_SAFETY_CONFIRMATION_KEYWORDS
+        )
         if is_safe:
             response_text = "شكراً لك. أنا هنا للمساعدة. كيف يمكنني دعمك الآن؟"
             conversation_history.append({"role": "user", "content": user_text})
         else:
-            response_text = CRISIS_RESPONSE_MESSAGE # Repeat the crisis message
+            response_text = CRISIS_RESPONSE_MESSAGE
     elif intent == "crisis":
         response_text = CRISIS_RESPONSE_MESSAGE
-        # Add context to know we are in the crisis protocol
         conversation_history.append({"role": "user", "content": user_text})
-        conversation_history.append({"role": "assistant", "content": response_text, "context": "crisis"})
+        conversation_history.append(
+            {"role": "assistant", "content": response_text, "context": "crisis"}
+        )
     else:
         # 4. Generate Response (LLM)
-        response_text = await loop.run_in_executor(
+        resp_start = time.time()
+        response_text = await asyncio.get_running_loop().run_in_executor(
             executor, generate_response, conversation_history, user_text
         )
+        resp_end = time.time()
+        logging.info(f"Responder finished in {(resp_end - resp_start):.2f}s")
         conversation_history.append({"role": "user", "content": user_text})
         conversation_history.append({"role": "assistant", "content": response_text})
 
-    responder_time = time.time()
-    logging.info(f"Responder finished in {responder_time - nlp_time:.2f}s")
-
     # 5. Text-to-Speech (TTS)
-    audio_response = await loop.run_in_executor(executor, text_to_speech, response_text)
-    tts_time = time.time()
-    logging.info(f"TTS finished in {tts_time - responder_time:.2f}s")
+    tts_start = time.time()
+    audio_response = await asyncio.get_running_loop().run_in_executor(
+        executor, text_to_speech, response_text
+    )
+    tts_end = time.time()
+    logging.info(f"TTS finished in {(tts_end - tts_start):.2f}s")
 
     total_time = time.time() - start_time
     logging.info(f"--- Total turn time: {total_time:.2f}s ---")

@@ -17,11 +17,15 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 AZURE_SPEECH_KEY = os.getenv("AZURE_SPEECH_KEY")
 AZURE_SPEECH_REGION = os.getenv("AZURE_SPEECH_REGION")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
 
 # --- Speech-to-Text (STT) Configuration ---
 STT_PROVIDER = "openai"  # "openai" or "vosk"
 WHISPER_MODEL = "small"  # Recommended model for performance/accuracy balance
 VOSK_MODEL_PATH = "models/vosk-model-ar-0.22-linto-1.1.0"  # Path to Vosk model
+GEMINI_MODEL   = "gemini-2.5-flash"   # or "gemini-2.5-flash" for speed
+
 
 # --- Natural Language Processing (NLP) Configuration ---
 # Keywords to detect crisis intent. Case-insensitive.
